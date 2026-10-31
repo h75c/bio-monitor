@@ -1,0 +1,58 @@
+name: Bio monitor
+
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+    inputs:
+      discover_chat:
+        description: 'Find Telegram chat ID'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bio-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r requirements.txt
+
+      - name: Discover chat ID
+        if: ${{ inputs.discover_chat == true }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python bot.py --chat-id
+
+      - name: Check biography
+        if: ${{ inputs.discover_chat != true }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
+        run: python bot.py
+
+      - name: Save encrypted state
+        if: ${{ always() && inputs.discover_chat != true }}
+        run: |
+          if [ -f state.enc ]; then
+            git config user.name 'bio-monitor'
+            git config user.email 'bio-monitor@users.noreply.github.com'
+            git add state.enc
+            if ! git diff --cached --quiet; then
+              git commit -m 'Update encrypted monitor state'
+              git push
+            fi
+          fi
