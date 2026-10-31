@@ -66,7 +66,8 @@ def run():
                 raise ValueError('Missing biography')
             if account.get('profile_id', profile_id) != profile_id:
                 raise ValueError('Username now belongs to a different account')
-        except Exception:
+        except Exception as error:
+            print('Instagram diagnostic:', type(error).__name__)
             failed = True
             if not account.get('unavailable'):
                 send(f'تعذر فحص بايو @{username}. المراقبة غير مؤكدة لهذا الحساب حاليًا؛ قد يكون السبب تقييد إنستقرام أو عدم توفر الحساب. سأعيد المحاولة في الفحص التالي.')
