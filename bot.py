@@ -32,11 +32,21 @@ def run():
         print('Private chat IDs:', ', '.join(map(str, ids)) or 'None: send /start to your bot and retry.')
         return 0
     chat = os.environ['TELEGRAM_CHAT_ID'].strip()
-    username = os.environ['INSTAGRAM_USERNAME'].strip().lstrip('@')
+    import re
+    usernames = list(dict.fromkeys(
+        name.lstrip('@').lower() for name in
+        re.split(r'[,،\s]+', os.environ['INSTAGRAM_USERNAME'].strip()) if name
+    ))
+    if not usernames or any(not re.fullmatch(r'[a-z0-9_.]{1,30}', n) for n in usernames):
+        raise ValueError('Invalid usernames')
     cipher = Fernet(base64.urlsafe_b64encode(hashlib.sha256(token.encode()).digest()))
     state = json.loads(cipher.decrypt(STATE.read_bytes())) if STATE.exists() else {}
-    if state.get('username', username) != username:
-        raise RuntimeError('Target changed: delete state.enc before using a new username.')
+    # Preserve the previous single-account baseline on upgrade.
+    if 'accounts' not in state:
+        previous = state
+        state = {'accounts': {}}
+        if previous.get('username'):
+            state['accounts'][previous['username'].lower()] = previous
 
     def send(message):
         telegram(token, 'sendMessage', {'chat_id': chat, 'text': message})
@@ -44,35 +54,38 @@ def run():
     def save():
         STATE.write_bytes(cipher.encrypt(json.dumps(state, ensure_ascii=False).encode()))
 
-    try:
-        loader = instaloader.Instaloader(quiet=True, max_connection_attempts=1, request_timeout=25)
-        profile = instaloader.Profile.from_username(loader.context, username)
-        bio = profile.biography
-        profile_id = str(profile.userid)
-        if not isinstance(bio, str):
-            raise ValueError('Missing biography')
-        if state.get('profile_id', profile_id) != profile_id:
-            raise ValueError('Username now belongs to a different account')
-    except Exception:
-        # Do not print provider exceptions: they may contain target data.
-        if not state.get('unavailable'):
-            send(f'تعذر فحص بايو @{username}. المراقبة غير مؤكدة حاليًا؛ قد يكون السبب تقييد إنستقرام أو عدم توفر الحساب. سأعيد المحاولة في الفحص التالي.')
-        state.update(username=username, unavailable=True)
-        save()
-        print('Instagram check failed. Previous biography preserved.')
-        return 1
+    failed = False
+    for username in usernames:
+        account = state['accounts'].setdefault(username, {})
+        try:
+            loader = instaloader.Instaloader(quiet=True, max_connection_attempts=1, request_timeout=25)
+            profile = instaloader.Profile.from_username(loader.context, username)
+            bio = profile.biography
+            profile_id = str(profile.userid)
+            if not isinstance(bio, str):
+                raise ValueError('Missing biography')
+            if account.get('profile_id', profile_id) != profile_id:
+                raise ValueError('Username now belongs to a different account')
+        except Exception:
+            failed = True
+            if not account.get('unavailable'):
+                send(f'تعذر فحص بايو @{username}. المراقبة غير مؤكدة لهذا الحساب حاليًا؛ قد يكون السبب تقييد إنستقرام أو عدم توفر الحساب. سأعيد المحاولة في الفحص التالي.')
+            account['unavailable'] = True
+            save()
+            print('One account could not be checked. Previous biography preserved.')
+            continue
 
-    now = datetime.now(timezone.utc).isoformat(timespec='seconds')
-    if 'bio' not in state:
-        send(f'نجح أول فحص لبايو @{username}.\nالبايو الحالي:\n{bio or "(فارغ)"}\n\nالفحص مجدول كل 10 دقائق، وقد تتأخر الجدولة. هذا ليس إشعار تغيير.')
-    elif state['bio'] != bio:
-        send(f'تغير بايو @{username}\n\nالسابق:\n{state["bio"] or "(فارغ)"}\n\nالجديد:\n{bio or "(فارغ)"}\n\nوقت الرصد UTC: {now}\nوقت التغيير الفعلي غير معروف.')
-    elif state.get('unavailable'):
-        send(f'عادت قراءة بايو @{username} للعمل. البايو لم يتغير مقارنة بآخر قراءة ناجحة.')
-    state.update(username=username, profile_id=profile_id, bio=bio, unavailable=False)
-    save()
-    print('Check succeeded. Encrypted state saved.')
-    return 0
+        now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        if 'bio' not in account:
+            send(f'نجح أول فحص لبايو @{username}.\nالبايو الحالي:\n{bio or "(فارغ)"}\n\nالفحص مجدول كل 10 دقائق، وقد تتأخر الجدولة. هذا ليس إشعار تغيير.')
+        elif account['bio'] != bio:
+            send(f'تغير بايو @{username}\n\nالسابق:\n{account["bio"] or "(فارغ)"}\n\nالجديد:\n{bio or "(فارغ)"}\n\nوقت الرصد UTC: {now}\nوقت التغيير الفعلي غير معروف.')
+        elif account.get('unavailable'):
+            send(f'عادت قراءة بايو @{username} للعمل. البايو لم يتغير مقارنة بآخر قراءة ناجحة.')
+        account.update(profile_id=profile_id, bio=bio, unavailable=False)
+        save()
+        print('One account checked successfully. Encrypted state saved.')
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
